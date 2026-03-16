@@ -1,6 +1,5 @@
 /* ============================================
-   AI PDF READER — app.js
-   Bootstrap Version | Web Speech API (Free)
+   AI PDF READER — app.js (FIXED PAGE SEPARATION)
    ============================================ */
 'use strict';
 
@@ -13,20 +12,21 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
    STATE
    ============================================ */
 const state = {
-  pdfDoc:       null,
-  currentPage:  1,
-  totalPages:   0,
-  scale:        1.0,
-  fileName:     '',
-  textContent:  {},
-  bookmarks:    [],
-  notes:        [],
-  searchResults:[],
-  searchIndex:  0,
-  isSpeaking:   false,
-  isPaused:     false,
-  speechQueue:  [],
-  voiceSettings:{
+  pdfDoc:        null,
+  currentPage:   1,
+  totalPages:    0,
+  scale:         1.0,
+  fileName:      '',
+  textContent:   {},
+  bookmarks:     [],
+  notes:         [],
+  searchResults: [],
+  searchIndex:   0,
+  isSpeaking:    false,
+  isPaused:      false,
+  speechQueue:   [],
+  renderQueue:   Promise.resolve(), // ← prevents overlapping renders
+  voiceSettings: {
     voice:  null,
     rate:   1.0,
     pitch:  1.0,
@@ -175,7 +175,8 @@ dom.uploadCard.addEventListener('drop', e => {
 async function loadPDF(file) {
   try {
     showProgress('Loading PDF...');
-    state.fileName    = file.name.replace('.pdf', '');
+
+    state.fileName    = file.name.replace(/\.pdf$/i, '');
     dom.docTitle.textContent = state.fileName;
 
     const buffer      = await file.arrayBuffer();
@@ -184,7 +185,7 @@ async function loadPDF(file) {
     loadingTask.onProgress = d => {
       if (d.total) {
         updateProgress(
-          Math.round((d.loaded / d.total) * 60),
+          Math.round((d.loaded / d.total) * 50),
           'Loading PDF...'
         );
       }
@@ -195,18 +196,25 @@ async function loadPDF(file) {
     state.currentPage = 1;
     state.textContent = {};
 
-    // Update UI counters
+    // Reset UI counters
     dom.totalPages.textContent    = state.totalPages;
     dom.currentPageInput.max      = state.totalPages;
     dom.currentPageInput.value    = 1;
     dom.notePageLabel.textContent = 'Page 1';
 
-    // Show viewer
+    // Show viewer panels
     dom.uploadZone.classList.add('d-none');
     dom.pdfContainer.classList.remove('d-none');
     dom.bottomBar.classList.remove('d-none');
 
-    updateProgress(70, 'Rendering pages...');
+    updateProgress(55, 'Building page layout...');
+
+    // ── IMPORTANT: build empty page slots first ──
+    buildPageSlots();
+
+    updateProgress(65, 'Rendering pages...');
+
+    // ── Then render each page into its slot ──
     await renderAllPages();
 
     updateProgress(88, 'Loading outline...');
@@ -216,7 +224,7 @@ async function loadPDF(file) {
     await generateThumbnails();
 
     hideProgress();
-    showToast('✅ PDF loaded successfully!');
+    showToast('✅ PDF loaded — ' + state.totalPages + ' pages');
 
     // Pre-cache text for page 1
     extractPageText(1);
@@ -229,139 +237,274 @@ async function loadPDF(file) {
 }
 
 /* ============================================
-   RENDER ALL PAGES
+   BUILD PAGE SLOTS
+   Creates one wrapper + canvas per page FIRST
+   so pages never overlap
    ============================================ */
-async function renderAllPages() {
+function buildPageSlots() {
+  // Clear any previous content
   dom.pdfViewer.innerHTML = '';
-  const containerWidth = dom.pdfContainer.clientWidth - 32;
 
   for (let i = 1; i <= state.totalPages; i++) {
-    const page     = await state.pdfDoc.getPage(i);
-    const baseVP   = page.getViewport({ scale: 1 });
-    const scale    = Math.min(containerWidth / baseVP.width, 2.0);
-    state.scale    = scale;
-    const viewport = page.getViewport({ scale });
 
-    // Wrapper
-    const wrapper = document.createElement('div');
-    wrapper.className = 'page-wrapper' + (i === 1 ? ' active-page' : '');
+    /* ── Outer page wrapper ── */
+    const wrapper        = document.createElement('div');
+    wrapper.className    = 'page-wrapper';
+    wrapper.id           = `page-wrapper-${i}`;
     wrapper.dataset.page = i;
 
-    // Canvas
-    const canvas   = document.createElement('canvas');
-    canvas.width   = viewport.width;
-    canvas.height  = viewport.height;
+    if (i === 1) wrapper.classList.add('active-page');
 
-    // Badge
-    const badge = document.createElement('div');
-    badge.className   = 'page-number-badge';
-    badge.textContent = `${i} / ${state.totalPages}`;
+    /* ── Page header label ── */
+    const header           = document.createElement('div');
+    header.className       = 'page-header-label';
+    header.textContent     = `Page ${i} of ${state.totalPages}`;
 
+    /* ── Canvas (will be sized when rendered) ── */
+    const canvas           = document.createElement('canvas');
+    canvas.id              = `pdf-canvas-${i}`;
+    canvas.className       = 'pdf-page-canvas';
+
+    /* ── Loading placeholder ── */
+    const placeholder      = document.createElement('div');
+    placeholder.className  = 'page-placeholder';
+    placeholder.id         = `placeholder-${i}`;
+    placeholder.innerHTML  = `
+      <div class="placeholder-inner">
+        <div class="spinner-border spinner-border-sm text-secondary"
+             role="status"></div>
+        <span class="ms-2 text-secondary" style="font-size:13px;">
+          Loading page ${i}...
+        </span>
+      </div>`;
+
+    /* ── Page footer badge ── */
+    const footer           = document.createElement('div');
+    footer.className       = 'page-footer-badge';
+    footer.textContent     = `${i} / ${state.totalPages}`;
+
+    /* ── Separator line between pages ── */
+    const separator        = document.createElement('div');
+    separator.className    = 'page-separator';
+
+    wrapper.appendChild(header);
+    wrapper.appendChild(placeholder);
     wrapper.appendChild(canvas);
-    wrapper.appendChild(badge);
+    wrapper.appendChild(footer);
     dom.pdfViewer.appendChild(wrapper);
+    dom.pdfViewer.appendChild(separator);
 
-    // Render
-    await page.render({
-      canvasContext: canvas.getContext('2d'),
-      viewport
-    }).promise;
-
-    wrapper.addEventListener('click', () => navigateToPage(i));
-
-    updateProgress(
-      70 + Math.round((i / state.totalPages) * 18),
-      `Rendering page ${i} of ${state.totalPages}...`
-    );
+    // Click to set as active page
+    wrapper.addEventListener('click', () => {
+      setActivePage(i);
+    });
   }
 
+  // Start scroll observer after slots exist
   setupScrollObserver();
 }
 
 /* ============================================
-   INTERSECTION OBSERVER (auto-update current page)
+   RENDER ALL PAGES
+   Renders each page canvas one by one
+   ============================================ */
+async function renderAllPages() {
+  const containerWidth = dom.pdfContainer.clientWidth - 40;
+
+  for (let i = 1; i <= state.totalPages; i++) {
+    await renderSinglePage(i, containerWidth);
+
+    updateProgress(
+      65 + Math.round((i / state.totalPages) * 22),
+      `Rendering page ${i} of ${state.totalPages}...`
+    );
+  }
+}
+
+/* ============================================
+   RENDER SINGLE PAGE
+   ============================================ */
+async function renderSinglePage(pageNum, containerWidth) {
+  try {
+    const page     = await state.pdfDoc.getPage(pageNum);
+    const baseVP   = page.getViewport({ scale: 1 });
+
+    // Calculate scale to fit container width
+    const scale    = Math.min(
+      (containerWidth || dom.pdfContainer.clientWidth - 40) / baseVP.width,
+      2.0
+    );
+
+    // Only update global scale based on page 1
+    if (pageNum === 1) state.scale = scale;
+
+    const viewport = page.getViewport({ scale });
+
+    const canvas   = $(`pdf-canvas-${pageNum}`);
+    const ph       = $(`placeholder-${pageNum}`);
+
+    if (!canvas) return;
+
+    // Set exact canvas dimensions
+    canvas.width  = Math.floor(viewport.width);
+    canvas.height = Math.floor(viewport.height);
+    canvas.style.width  = canvas.width  + 'px';
+    canvas.style.height = canvas.height + 'px';
+    canvas.style.display = 'block';
+
+    const ctx = canvas.getContext('2d');
+
+    // Clear before rendering
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Render the PDF page onto the canvas
+    const renderTask = page.render({
+      canvasContext: ctx,
+      viewport:      viewport
+    });
+
+    await renderTask.promise;
+
+    // Hide placeholder once rendered
+    if (ph) ph.style.display = 'none';
+
+  } catch (err) {
+    console.error(`Error rendering page ${pageNum}:`, err);
+  }
+}
+
+/* ============================================
+   SCROLL OBSERVER
+   Auto-detects which page is visible
    ============================================ */
 function setupScrollObserver() {
   const observer = new IntersectionObserver(entries => {
     entries.forEach(entry => {
-      if (entry.isIntersecting) {
+      if (entry.isIntersecting && entry.intersectionRatio >= 0.3) {
         const pg = parseInt(entry.target.dataset.page);
-        if (pg !== state.currentPage) {
-          state.currentPage = pg;
-          dom.currentPageInput.value    = pg;
-          dom.notePageLabel.textContent = `Page ${pg}`;
-          updatePageWrappers(pg);
-          syncThumbnails(pg);
-          extractPageText(pg);
+        if (pg && pg !== state.currentPage) {
+          setActivePage(pg, false); // false = don't scroll (already visible)
         }
       }
     });
   }, {
-    root: dom.pdfContainer,
-    threshold: 0.5
+    root:       dom.pdfContainer,
+    rootMargin: '0px',
+    threshold:  [0.3, 0.5, 0.8]
   });
 
-  document.querySelectorAll('.page-wrapper').forEach(w => observer.observe(w));
-}
-
-function updatePageWrappers(active) {
   document.querySelectorAll('.page-wrapper').forEach(w => {
-    w.classList.toggle('active-page', parseInt(w.dataset.page) === active);
+    observer.observe(w);
   });
 }
 
-function syncThumbnails(active) {
+/* ============================================
+   SET ACTIVE PAGE
+   ============================================ */
+function setActivePage(pg, scroll = true) {
+  if (!state.pdfDoc) return;
+  pg = Math.max(1, Math.min(state.totalPages, pg));
+
+  state.currentPage             = pg;
+  dom.currentPageInput.value    = pg;
+  dom.notePageLabel.textContent = `Page ${pg}`;
+
+  // Update prev/next buttons
+  dom.prevPage.disabled = pg <= 1;
+  dom.nextPage.disabled = pg >= state.totalPages;
+
+  // Update active page highlight
+  document.querySelectorAll('.page-wrapper').forEach(w => {
+    w.classList.toggle(
+      'active-page',
+      parseInt(w.dataset.page) === pg
+    );
+  });
+
+  // Scroll to page
+  if (scroll) {
+    const wrapper = $(`page-wrapper-${pg}`);
+    if (wrapper) {
+      wrapper.scrollIntoView({
+        behavior: 'smooth',
+        block:    'start'
+      });
+    }
+  }
+
+  // Sync thumbnails
+  syncThumbnails(pg);
+
+  // Pre-cache text
+  extractPageText(pg);
+}
+
+function syncThumbnails(pg) {
   document.querySelectorAll('.thumbnail-item').forEach(t => {
-    t.classList.toggle('active', parseInt(t.dataset.page) === active);
+    t.classList.toggle('active', parseInt(t.dataset.page) === pg);
   });
 }
 
 /* ============================================
    PAGE NAVIGATION
    ============================================ */
-function navigateToPage(pg) {
-  if (!state.pdfDoc) return;
-  pg = Math.max(1, Math.min(state.totalPages, pg));
-  state.currentPage = pg;
-  dom.currentPageInput.value    = pg;
-  dom.notePageLabel.textContent = `Page ${pg}`;
-
-  document.querySelector(`[data-page="${pg}"]`)
-    ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-  updatePageWrappers(pg);
-  syncThumbnails(pg);
-  extractPageText(pg);
-}
+dom.prevPage.addEventListener('click', () =>
+  setActivePage(state.currentPage - 1));
 
 dom.nextPage.addEventListener('click', () =>
-  navigateToPage(state.currentPage + 1));
+  setActivePage(state.currentPage + 1));
+
+dom.currentPageInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    const v = parseInt(dom.currentPageInput.value);
+    if (!isNaN(v)) setActivePage(v);
+  }
+});
 
 dom.currentPageInput.addEventListener('change', () => {
   const v = parseInt(dom.currentPageInput.value);
-  if (!isNaN(v)) navigateToPage(v);
+  if (!isNaN(v)) setActivePage(v);
 });
 
 /* ============================================
    ZOOM
    ============================================ */
 async function setZoom(newScale) {
-  newScale = Math.max(0.5, Math.min(3.0, newScale));
+  if (!state.pdfDoc) return;
+
+  newScale = Math.max(0.4, Math.min(3.0, newScale));
   state.scale = newScale;
   dom.zoomLevel.textContent = Math.round(newScale * 100) + '%';
 
-  const wrappers = document.querySelectorAll('.page-wrapper');
-  for (let i = 0; i < wrappers.length; i++) {
-    const page     = await state.pdfDoc.getPage(i + 1);
+  showProgress('Re-rendering at ' + Math.round(newScale * 100) + '%...');
+
+  const containerWidth = dom.pdfContainer.clientWidth - 40;
+
+  for (let i = 1; i <= state.totalPages; i++) {
+    const page     = await state.pdfDoc.getPage(i);
     const viewport = page.getViewport({ scale: newScale });
-    const canvas   = wrappers[i].querySelector('canvas');
-    canvas.width   = viewport.width;
-    canvas.height  = viewport.height;
-    await page.render({
-      canvasContext: canvas.getContext('2d'),
-      viewport
-    }).promise;
+
+    const canvas   = $(`pdf-canvas-${i}`);
+    if (!canvas) continue;
+
+    canvas.width  = Math.floor(viewport.width);
+    canvas.height = Math.floor(viewport.height);
+    canvas.style.width  = canvas.width  + 'px';
+    canvas.style.height = canvas.height + 'px';
+
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    await page.render({ canvasContext: ctx, viewport }).promise;
+
+    updateProgress(
+      Math.round((i / state.totalPages) * 100),
+      `Re-rendering page ${i} of ${state.totalPages}...`
+    );
   }
+
+  hideProgress();
+  showToast(`🔍 Zoom: ${Math.round(newScale * 100)}%`);
 }
 
 dom.zoomIn.addEventListener('click', () =>
@@ -370,12 +513,30 @@ dom.zoomIn.addEventListener('click', () =>
 dom.zoomOut.addEventListener('click', () =>
   setZoom(state.scale - 0.25));
 
-dom.fitPage.addEventListener('click', () => {
+dom.fitPage.addEventListener('click', async () => {
   if (!state.pdfDoc) return;
-  state.pdfDoc.getPage(state.currentPage).then(page => {
-    const vp = page.getViewport({ scale: 1 });
-    setZoom((dom.pdfContainer.clientWidth - 32) / vp.width);
-  });
+  const page  = await state.pdfDoc.getPage(state.currentPage);
+  const vp    = page.getViewport({ scale: 1 });
+  const scale = (dom.pdfContainer.clientWidth - 40) / vp.width;
+  setZoom(parseFloat(scale.toFixed(2)));
+});
+
+/* ============================================
+   WINDOW RESIZE — re-render at new width
+   ============================================ */
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(async () => {
+    if (!state.pdfDoc) return;
+    const containerWidth = dom.pdfContainer.clientWidth - 40;
+    const page  = await state.pdfDoc.getPage(1);
+    const baseVP = page.getViewport({ scale: 1 });
+    const newScale = Math.min(containerWidth / baseVP.width, 2.0);
+    state.scale = newScale;
+    dom.zoomLevel.textContent = Math.round(newScale * 100) + '%';
+    await renderAllPages();
+  }, 300);
 });
 
 /* ============================================
@@ -386,21 +547,16 @@ async function extractPageText(pg) {
   try {
     const page    = await state.pdfDoc.getPage(pg);
     const content = await page.getTextContent();
-    const text    = content.items.map(i => i.str).join(' ').trim();
+    const text    = content.items
+      .map(item => item.str)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
     state.textContent[pg] = text;
     return text;
   } catch {
     return '';
   }
-}
-
-async function extractAllText() {
-  let full = '';
-  for (let i = 1; i <= state.totalPages; i++) {
-    const text = await extractPageText(i);
-    full += `\n\n--- Page ${i} ---\n\n${text}`;
-  }
-  return full;
 }
 
 /* ============================================
@@ -430,9 +586,9 @@ async function loadOutline() {
 
 function renderOutlineItems(items, container, depth) {
   items.forEach(item => {
-    const a          = document.createElement('a');
-    a.href           = '#';
-    a.textContent    = item.title || 'Untitled';
+    const a       = document.createElement('a');
+    a.href        = '#';
+    a.textContent = item.title || 'Untitled';
     a.style.paddingLeft = (12 + depth * 16) + 'px';
 
     a.addEventListener('click', async e => {
@@ -444,7 +600,7 @@ function renderOutlineItems(items, container, depth) {
           : item.dest;
         if (dest) {
           const pgIdx = await state.pdfDoc.getPageIndex(dest[0]);
-          navigateToPage(pgIdx + 1);
+          setActivePage(pgIdx + 1);
           closeSidebarMobile();
         }
       } catch {}
@@ -463,33 +619,38 @@ function renderOutlineItems(items, container, depth) {
    ============================================ */
 async function generateThumbnails() {
   dom.thumbnailList.innerHTML = '';
-  const limit = Math.min(state.totalPages, 50);
+  const limit      = Math.min(state.totalPages, 100);
+  const thumbScale = 0.12;
 
   for (let i = 1; i <= limit; i++) {
     const page     = await state.pdfDoc.getPage(i);
-    const viewport = page.getViewport({ scale: 0.15 });
+    const viewport = page.getViewport({ scale: thumbScale });
 
-    const item        = document.createElement('div');
-    item.className    = 'thumbnail-item' + (i === 1 ? ' active' : '');
-    item.dataset.page = i;
+    const item           = document.createElement('div');
+    item.className       = 'thumbnail-item' + (i === 1 ? ' active' : '');
+    item.dataset.page    = i;
+    item.title           = `Go to page ${i}`;
 
-    const canvas  = document.createElement('canvas');
-    canvas.width  = viewport.width;
-    canvas.height = viewport.height;
+    const canvas         = document.createElement('canvas');
+    canvas.width         = viewport.width;
+    canvas.height        = viewport.height;
+    canvas.style.width   = '100%';
+    canvas.style.height  = 'auto';
+    canvas.style.display = 'block';
 
-    const label           = document.createElement('div');
-    label.className       = 'thumbnail-label';
-    label.textContent     = `Page ${i}`;
+    const label          = document.createElement('div');
+    label.className      = 'thumbnail-label';
+    label.textContent    = `Page ${i}`;
 
     item.appendChild(canvas);
     item.appendChild(label);
     dom.thumbnailList.appendChild(item);
 
-    // Render thumbnail (non-blocking)
+    // Render thumbnail async (non-blocking)
     page.render({ canvasContext: canvas.getContext('2d'), viewport });
 
     item.addEventListener('click', () => {
-      navigateToPage(i);
+      setActivePage(i);
       syncThumbnails(i);
       closeSidebarMobile();
     });
@@ -503,42 +664,35 @@ dom.menuBtn.addEventListener('click', () => {
   const isOpen = dom.sidebar.classList.contains('open');
   if (isOpen) {
     dom.sidebar.classList.remove('open');
-    dom.sidebar.classList.add('d-none');
+    setTimeout(() => dom.sidebar.classList.add('d-none'), 300);
   } else {
     dom.sidebar.classList.remove('d-none');
-    // Small delay so d-none removal takes effect before transition
     requestAnimationFrame(() => dom.sidebar.classList.add('open'));
   }
 });
 
 dom.closeSidebar.addEventListener('click', () => {
   dom.sidebar.classList.remove('open');
-  dom.sidebar.classList.add('d-none');
+  setTimeout(() => dom.sidebar.classList.add('d-none'), 300);
 });
 
 function closeSidebarMobile() {
   if (window.innerWidth < 768) {
     dom.sidebar.classList.remove('open');
-    dom.sidebar.classList.add('d-none');
+    setTimeout(() => dom.sidebar.classList.add('d-none'), 300);
   }
 }
 
 // Sidebar Tab Switching
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    // Update active tab button
     document.querySelectorAll('.tab-btn')
       .forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
 
-    // Show matching panel, hide others
     ['toc', 'bookmarks', 'thumbnails'].forEach(name => {
       const panel = $(name + 'Panel');
-      if (name === btn.dataset.tab) {
-        panel.classList.remove('d-none');
-      } else {
-        panel.classList.add('d-none');
-      }
+      panel.classList.toggle('d-none', name !== btn.dataset.tab);
     });
   });
 });
@@ -590,6 +744,7 @@ async function performSearch(query) {
   }
 
   const q = query.toLowerCase();
+
   for (let i = 1; i <= state.totalPages; i++) {
     const text = await extractPageText(i);
     if (text.toLowerCase().includes(q)) {
@@ -609,7 +764,7 @@ async function performSearch(query) {
 function jumpToSearch(idx) {
   const pg = state.searchResults[idx];
   if (!pg) return;
-  navigateToPage(pg);
+  setActivePage(pg);
   dom.searchCount.textContent =
     `${idx + 1} / ${state.searchResults.length} page(s)`;
 }
@@ -653,9 +808,9 @@ function renderBookmarks() {
   dom.bookmarkList.innerHTML = '';
 
   state.bookmarks.forEach((bk, idx) => {
-    const div       = document.createElement('div');
-    div.className   = 'bookmark-item';
-    div.innerHTML   = `
+    const div     = document.createElement('div');
+    div.className = 'bookmark-item';
+    div.innerHTML = `
       <i class="bi bi-bookmark-fill text-primary"></i>
       <span class="bk-page">P.${bk.page}</span>
       <span class="bk-label">
@@ -671,15 +826,13 @@ function renderBookmarks() {
         <i class="bi bi-trash"></i>
       </button>`;
 
-    // Click to navigate
     div.addEventListener('click', e => {
       if (!e.target.closest('.bk-del')) {
-        navigateToPage(bk.page);
+        setActivePage(bk.page);
         closeSidebarMobile();
       }
     });
 
-    // Delete button
     div.querySelector('.bk-del').addEventListener('click', e => {
       e.stopPropagation();
       state.bookmarks.splice(idx, 1);
@@ -693,7 +846,7 @@ function renderBookmarks() {
 }
 
 /* ============================================
-   SPEECH — Web Speech API (100% FREE)
+   SPEECH — Web Speech API (FREE)
    ============================================ */
 let voices = [];
 
@@ -702,9 +855,7 @@ function loadVoices() {
   dom.voiceList.innerHTML = '';
 
   if (!voices.length) {
-    const opt     = document.createElement('option');
-    opt.textContent = 'Default Voice';
-    dom.voiceList.appendChild(opt);
+    dom.voiceList.innerHTML = '<option>Default Voice</option>';
     return;
   }
 
@@ -729,44 +880,38 @@ function loadVoices() {
 window.speechSynthesis.onvoiceschanged = loadVoices;
 loadVoices();
 
-// Voice selector change
 dom.voiceList.addEventListener('change', () => {
   const idx = parseInt(dom.voiceList.value);
   state.voiceSettings.voice = voices[idx] || null;
 });
 
-// Speed slider
 dom.speedRange.addEventListener('input', () => {
-  state.voiceSettings.rate  = parseFloat(dom.speedRange.value);
-  dom.speedVal.textContent  = state.voiceSettings.rate.toFixed(1) + 'x';
+  state.voiceSettings.rate = parseFloat(dom.speedRange.value);
+  dom.speedVal.textContent = state.voiceSettings.rate.toFixed(1) + 'x';
 });
 
-// Pitch slider
 dom.pitchRange.addEventListener('input', () => {
   state.voiceSettings.pitch = parseFloat(dom.pitchRange.value);
   dom.pitchVal.textContent  = state.voiceSettings.pitch.toFixed(1);
 });
 
-// Volume slider
 dom.volumeRange.addEventListener('input', () => {
   state.voiceSettings.volume = parseFloat(dom.volumeRange.value);
   dom.volumeVal.textContent  =
     Math.round(state.voiceSettings.volume * 100) + '%';
 });
 
-// Test Voice
 dom.testVoice.addEventListener('click', () => {
   stopSpeech();
   const u = new SpeechSynthesisUtterance(
-    'Hello! This is a test of the AI PDF Reader voice.'
+    'Hello! This is a test of the AI PDF Reader voice. Page separation is now working correctly.'
   );
   applyVoiceSettings(u);
   window.speechSynthesis.speak(u);
 });
 
-// Apply all voice settings to an utterance
 function applyVoiceSettings(u) {
-  if (state.voiceSettings.voice) u.voice  = state.voiceSettings.voice;
+  if (state.voiceSettings.voice) u.voice = state.voiceSettings.voice;
   u.rate   = state.voiceSettings.rate;
   u.pitch  = state.voiceSettings.pitch;
   u.volume = state.voiceSettings.volume;
@@ -779,12 +924,10 @@ dom.playBtn.addEventListener('click', async () => {
     return;
   }
   if (state.isSpeaking && !state.isPaused) {
-    pauseSpeech();
-    return;
+    pauseSpeech(); return;
   }
   if (state.isPaused) {
-    resumeSpeech();
-    return;
+    resumeSpeech(); return;
   }
   await readFromPage(state.currentPage);
 });
@@ -804,11 +947,10 @@ dom.readPageBtn.addEventListener('click', async () => {
   speakText(text, `📄 Reading page ${state.currentPage}...`);
 });
 
-/* ---- Read from a specific page to end ---- */
+/* ---- Read from page to end ---- */
 async function readFromPage(startPage) {
   stopSpeech();
   state.speechQueue = [];
-
   showToast(`🎤 Reading from page ${startPage}...`);
 
   for (let i = startPage; i <= state.totalPages; i++) {
@@ -819,22 +961,19 @@ async function readFromPage(startPage) {
   }
 
   if (!state.speechQueue.length) {
-    showToast('⚠️ No readable text found in document');
+    showToast('⚠️ No readable text found');
     return;
   }
-
   processQueue();
 }
 
-/* ---- Process multi-page speech queue ---- */
 function processQueue() {
   if (!state.speechQueue.length) {
-    onSpeechEnd();
-    return;
+    onSpeechEnd(); return;
   }
 
   const item = state.speechQueue.shift();
-  navigateToPage(item.page);
+  setActivePage(item.page);
 
   const u = new SpeechSynthesisUtterance(item.text);
   applyVoiceSettings(u);
@@ -860,11 +999,8 @@ function processQueue() {
   window.speechSynthesis.speak(u);
 }
 
-/* ---- Speak a single block of text ---- */
 function speakText(text, toastMsg = '') {
   stopSpeech();
-
-  // Chunk text to avoid browser limits
   const chunks = splitIntoChunks(text, 200);
   state.speechQueue = chunks.map(chunk => ({
     page: state.currentPage,
@@ -872,19 +1008,15 @@ function speakText(text, toastMsg = '') {
   }));
 
   if (toastMsg) showToast(toastMsg);
-
   state.isSpeaking = true;
   state.isPaused   = false;
   updateSpeechUI(true);
-
   speakChunkQueue();
 }
 
-/* ---- Speak chunks one at a time ---- */
 function speakChunkQueue() {
   if (!state.speechQueue.length) {
-    onSpeechEnd();
-    return;
+    onSpeechEnd(); return;
   }
 
   const item = state.speechQueue.shift();
@@ -892,21 +1024,18 @@ function speakChunkQueue() {
   applyVoiceSettings(u);
 
   u.onend = () => {
-    if (state.isSpeaking && !state.isPaused) {
-      speakChunkQueue();
-    }
+    if (state.isSpeaking && !state.isPaused) speakChunkQueue();
   };
 
   u.onerror = e => {
     if (e.error !== 'interrupted' && e.error !== 'canceled') {
-      console.error('Chunk speech error:', e.error);
+      console.error('Chunk error:', e.error);
     }
   };
 
   window.speechSynthesis.speak(u);
 }
 
-/* ---- Pause ---- */
 function pauseSpeech() {
   if (window.speechSynthesis.speaking) {
     window.speechSynthesis.pause();
@@ -917,7 +1046,6 @@ function pauseSpeech() {
   }
 }
 
-/* ---- Resume ---- */
 function resumeSpeech() {
   if (window.speechSynthesis.paused) {
     window.speechSynthesis.resume();
@@ -928,7 +1056,6 @@ function resumeSpeech() {
   }
 }
 
-/* ---- Stop ---- */
 function stopSpeech() {
   window.speechSynthesis.cancel();
   state.isSpeaking  = false;
@@ -937,19 +1064,16 @@ function stopSpeech() {
   updateSpeechUI(false);
 }
 
-/* ---- Pause/Resume button ---- */
 dom.pauseBtn.addEventListener('click', () => {
   if (state.isPaused) resumeSpeech();
   else pauseSpeech();
 });
 
-/* ---- Stop button ---- */
 dom.stopBtn.addEventListener('click', () => {
   stopSpeech();
   showToast('⏹ Reading stopped');
 });
 
-/* ---- When all speech finishes ---- */
 function onSpeechEnd() {
   state.isSpeaking  = false;
   state.isPaused    = false;
@@ -958,7 +1082,6 @@ function onSpeechEnd() {
   showToast('✅ Finished reading');
 }
 
-/* ---- Update speech buttons UI ---- */
 function updateSpeechUI(isReading) {
   if (isReading) {
     dom.playBtn.innerHTML = '<i class="bi bi-pause-fill"></i> Pause';
@@ -971,7 +1094,6 @@ function updateSpeechUI(isReading) {
   }
 }
 
-/* ---- Split long text into word chunks ---- */
 function splitIntoChunks(text, wordsPerChunk = 200) {
   const words  = text.split(/\s+/).filter(Boolean);
   const chunks = [];
@@ -997,8 +1119,6 @@ dom.saveNote.addEventListener('click', () => {
   });
   saveLocal();
   dom.notesInput.value = '';
-
-  // Close the offcanvas
   bootstrap.Offcanvas.getInstance($('notesOffcanvas'))?.hide();
   showToast(`💾 Note saved for page ${state.currentPage}`);
 });
@@ -1008,10 +1128,8 @@ dom.clearNote.addEventListener('click', () => {
 });
 
 /* ============================================
-   EXPORT TO PDF (jsPDF)
+   EXPORT TO PDF
    ============================================ */
-
-/* ---- Helper: draw styled PDF header ---- */
 function drawPdfHeader(doc, title, color) {
   doc.setFillColor(...color);
   doc.rect(0, 0, 210, 28, 'F');
@@ -1021,7 +1139,6 @@ function drawPdfHeader(doc, title, color) {
   doc.text(title, 15, 18);
 }
 
-/* ---- Helper: draw PDF footer on all pages ---- */
 function drawPdfFooters(doc, label) {
   const total = doc.internal.getNumberOfPages();
   for (let i = 1; i <= total; i++) {
@@ -1030,26 +1147,21 @@ function drawPdfFooters(doc, label) {
     doc.setTextColor(150, 150, 150);
     doc.text(
       `${label} — Page ${i} of ${total}`,
-      105, 290,
-      { align: 'center' }
+      105, 290, { align: 'center' }
     );
   }
 }
 
-/* ---- EXPORT: Reading Notes ---- */
+/* Export Notes */
 dom.exportNotesPdf.addEventListener('click', async () => {
   exportModalBS.hide();
-
   if (!state.notes.length) {
-    showToast('⚠️ No notes saved yet');
-    return;
+    showToast('⚠️ No notes saved yet'); return;
   }
-
   try {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
-
-    drawPdfHeader(doc, '📝 Reading Notes', [108, 99, 255]);
+    drawPdfHeader(doc, 'Reading Notes', [108, 99, 255]);
 
     doc.setTextColor(50, 50, 50);
     doc.setFontSize(10);
@@ -1057,28 +1169,22 @@ dom.exportNotesPdf.addEventListener('click', async () => {
     doc.text(`Document: ${state.fileName}`, 15, 38);
     doc.text(`Exported: ${new Date().toLocaleString()}`, 15, 45);
     doc.text(`Total Notes: ${state.notes.length}`, 15, 52);
-
     doc.setDrawColor(220, 220, 220);
     doc.line(15, 56, 195, 56);
 
     let y = 64;
-
     state.notes.forEach((note, idx) => {
       if (y > 265) { doc.addPage(); y = 20; }
-
-      // Note header box
       doc.setFillColor(240, 240, 252);
       doc.roundedRect(12, y - 5, 186, 10, 2, 2, 'F');
       doc.setFontSize(10);
       doc.setFont('helvetica', 'bold');
       doc.setTextColor(108, 99, 255);
       doc.text(
-        `Note #${idx + 1}  —  Page ${note.page}  |  ${note.timestamp}`,
+        `Note #${idx + 1} — Page ${note.page} | ${note.timestamp}`,
         15, y + 2
       );
       y += 12;
-
-      // Note body
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(10);
       doc.setTextColor(60, 60, 60);
@@ -1090,50 +1196,40 @@ dom.exportNotesPdf.addEventListener('click', async () => {
       y += 6;
     });
 
-    drawPdfFooters(doc, 'AI PDF Reader — Reading Notes');
+    drawPdfFooters(doc, 'AI PDF Reader — Notes');
     doc.save(`${state.fileName}_notes.pdf`);
-    showToast('✅ Notes exported as PDF!');
-
+    showToast('✅ Notes exported!');
   } catch (err) {
     showToast('❌ Export failed: ' + err.message);
-    console.error(err);
   }
 });
 
-/* ---- EXPORT: Page Text ---- */
+/* Export Text */
 dom.exportTextPdf.addEventListener('click', async () => {
   exportModalBS.hide();
   showProgress('Extracting text...');
-
   try {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
-
-    drawPdfHeader(doc, '📄 Extracted Text', [67, 217, 140]);
+    drawPdfHeader(doc, 'Extracted Text', [67, 217, 140]);
 
     doc.setTextColor(50, 50, 50);
     doc.setFontSize(10);
     doc.setFont('helvetica', 'normal');
     doc.text(`Source: ${state.fileName}`, 15, 36);
-    doc.text(`Total Pages: ${state.totalPages}`, 15, 43);
+    doc.text(`Pages: ${state.totalPages}`, 15, 43);
     doc.text(`Exported: ${new Date().toLocaleString()}`, 15, 50);
-
-    doc.setDrawColor(220, 220, 220);
     doc.line(15, 54, 195, 54);
 
     let y = 62;
-
     for (let i = 1; i <= state.totalPages; i++) {
       updateProgress(
         Math.round((i / state.totalPages) * 100),
-        `Exporting page ${i} of ${state.totalPages}...`
+        `Exporting page ${i}...`
       );
-
       const text = await extractPageText(i);
-
       if (y > 265) { doc.addPage(); y = 20; }
 
-      // Page label
       doc.setFillColor(245, 245, 255);
       doc.roundedRect(12, y - 4, 186, 9, 2, 2, 'F');
       doc.setFontSize(10);
@@ -1142,14 +1238,12 @@ dom.exportTextPdf.addEventListener('click', async () => {
       doc.text(`Page ${i}`, 15, y + 2);
       y += 12;
 
-      // Page text
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9);
       doc.setTextColor(60, 60, 60);
-      const lines = doc.splitTextToSize(
-        text || '[No readable text on this page]', 180
-      );
-      lines.forEach(line => {
+      doc.splitTextToSize(
+        text || '[No readable text]', 180
+      ).forEach(line => {
         if (y > 278) { doc.addPage(); y = 15; }
         doc.text(line, 15, y);
         y += 5;
@@ -1160,33 +1254,25 @@ dom.exportTextPdf.addEventListener('click', async () => {
     drawPdfFooters(doc, 'AI PDF Reader — Extracted Text');
     doc.save(`${state.fileName}_text.pdf`);
     hideProgress();
-    showToast('✅ Text exported as PDF!');
-
+    showToast('✅ Text exported!');
   } catch (err) {
     hideProgress();
     showToast('❌ Export failed: ' + err.message);
-    console.error(err);
   }
 });
 
-/* ---- EXPORT: Summary Report ---- */
+/* Export Summary */
 dom.exportSummaryPdf.addEventListener('click', async () => {
   exportModalBS.hide();
   showProgress('Generating summary...');
-
   try {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
 
-    // Count words & chars
-    let totalWords = 0;
-    let totalChars = 0;
-
+    let totalWords = 0, totalChars = 0;
     for (let i = 1; i <= state.totalPages; i++) {
-      updateProgress(
-        Math.round((i / state.totalPages) * 75),
-        `Analysing page ${i}...`
-      );
+      updateProgress(Math.round((i / state.totalPages) * 75),
+        `Analysing page ${i}...`);
       const text = await extractPageText(i);
       if (text) {
         totalWords += text.split(/\s+/).filter(Boolean).length;
@@ -1194,162 +1280,62 @@ dom.exportSummaryPdf.addEventListener('click', async () => {
       }
     }
 
-    const avgWords      = state.totalPages > 0
+    const avgWords = state.totalPages > 0
       ? Math.round(totalWords / state.totalPages) : 0;
-    const readMins      = Math.ceil(totalWords / 200);
+    const readMins = Math.ceil(totalWords / 200);
 
-    updateProgress(80, 'Building report...');
-
-    /* --- Cover Page --- */
+    // Cover
     doc.setFillColor(15, 15, 26);
     doc.rect(0, 0, 210, 297, 'F');
-
-    // Left accent bar
     doc.setFillColor(108, 99, 255);
     doc.rect(0, 0, 7, 297, 'F');
-
     doc.setTextColor(255, 255, 255);
     doc.setFontSize(26);
     doc.setFont('helvetica', 'bold');
     doc.text('Document Summary', 18, 55);
-
     doc.setFontSize(13);
     doc.setTextColor(180, 180, 220);
     doc.setFont('helvetica', 'normal');
-    doc.splitTextToSize(state.fileName, 170).forEach((line, i) => {
-      doc.text(line, 18, 70 + i * 8);
-    });
-
+    doc.splitTextToSize(state.fileName, 170).forEach((l, i) =>
+      doc.text(l, 18, 70 + i * 8));
     doc.setFontSize(10);
     doc.setTextColor(120, 120, 160);
     doc.text('Generated by AI PDF Reader', 18, 98);
     doc.text(new Date().toLocaleString(), 18, 106);
 
-    // Stats grid
-    const stats = [
+    // Stats
+    [
       { label: 'Total Pages',    value: state.totalPages,             color: [108,  99, 255] },
-      { label: 'Total Words',    value: totalWords.toLocaleString(),   color: [ 67, 217, 140] },
-      { label: 'Characters',     value: totalChars.toLocaleString(),   color: [255, 101, 132] },
-      { label: 'Avg Words/Page', value: avgWords,                     color: [255, 184,  48] },
-      { label: 'Est. Read Time', value: `${readMins} min`,            color: [ 64, 196, 255] },
-      { label: 'Bookmarks',      value: state.bookmarks.length,       color: [200, 100, 255] },
-    ];
-
-    stats.forEach((s, i) => {
-      const col = i % 2;
-      const row = Math.floor(i / 2);
-      const x   = 18 + col * 96;
-      const y   = 128 + row * 36;
-
+      { label: 'Total Words',    value: totalWords.toLocaleString(),  color: [ 67, 217, 140] },
+      { label: 'Characters',     value: totalChars.toLocaleString(),  color: [255, 101, 132] },
+      { label: 'Avg Words/Page', value: avgWords,                    color: [255, 184,  48] },
+      { label: 'Est. Read Time', value: `${readMins} min`,           color: [ 64, 196, 255] },
+      { label: 'Bookmarks',      value: state.bookmarks.length,      color: [200, 100, 255] },
+    ].forEach((s, i) => {
+      const x = 18 + (i % 2) * 96;
+      const y = 128 + Math.floor(i / 2) * 36;
       doc.setFillColor(28, 28, 48);
       doc.roundedRect(x, y, 88, 28, 3, 3, 'F');
       doc.setDrawColor(...s.color);
       doc.setLineWidth(0.5);
       doc.roundedRect(x, y, 88, 28, 3, 3, 'S');
-
       doc.setTextColor(...s.color);
       doc.setFontSize(17);
       doc.setFont('helvetica', 'bold');
       doc.text(String(s.value), x + 44, y + 13, { align: 'center' });
-
       doc.setTextColor(180, 180, 220);
       doc.setFontSize(8);
       doc.setFont('helvetica', 'normal');
       doc.text(s.label, x + 44, y + 22, { align: 'center' });
     });
 
-    /* --- Page 2: Bookmarks --- */
-    doc.addPage();
-    doc.setFillColor(26, 26, 46);
-    doc.rect(0, 0, 210, 297, 'F');
-    doc.setFillColor(108, 99, 255);
-    doc.rect(0, 0, 7, 297, 'F');
-
-    doc.setTextColor(255, 255, 255);
-    doc.setFontSize(16);
-    doc.setFont('helvetica', 'bold');
-    doc.text('Bookmarks', 18, 28);
-    doc.setDrawColor(108, 99, 255);
-    doc.line(18, 32, 192, 32);
-
-    let yB = 44;
-    if (!state.bookmarks.length) {
-      doc.setFontSize(11);
-      doc.setTextColor(150, 150, 180);
-      doc.text('No bookmarks recorded.', 18, yB);
-    } else {
-      state.bookmarks.forEach(bk => {
-        if (yB > 270) { doc.addPage(); yB = 20; }
-        doc.setFillColor(38, 38, 65);
-        doc.roundedRect(16, yB - 4, 178, 13, 2, 2, 'F');
-        doc.setFontSize(10);
-        doc.setFont('helvetica', 'bold');
-        doc.setTextColor(108, 99, 255);
-        doc.text(`Page ${bk.page}`, 20, yB + 4);
-        doc.setTextColor(200, 200, 230);
-        doc.setFont('helvetica', 'normal');
-        doc.text(bk.label, 55, yB + 4);
-        doc.setTextColor(120, 120, 160);
-        doc.setFontSize(8);
-        doc.text(bk.timestamp, 150, yB + 4);
-        yB += 18;
-      });
-    }
-
-    /* --- Page 3: Notes --- */
-    doc.addPage();
-    doc.setFillColor(26, 26, 46);
-    doc.rect(0, 0, 210, 297, 'F');
-    doc.setFillColor(255, 101, 132);
-    doc.rect(0, 0, 7, 297, 'F');
-
-    doc.setTextColor(255, 255, 255);
-    doc.setFontSize(16);
-    doc.setFont('helvetica', 'bold');
-    doc.text('Reading Notes', 18, 28);
-    doc.setDrawColor(255, 101, 132);
-    doc.line(18, 32, 192, 32);
-
-    let yN = 44;
-    if (!state.notes.length) {
-      doc.setFontSize(11);
-      doc.setTextColor(150, 150, 180);
-      doc.text('No notes recorded.', 18, yN);
-    } else {
-      state.notes.forEach((note, idx) => {
-        if (yN > 268) { doc.addPage(); yN = 20; }
-        doc.setFillColor(48, 28, 38);
-        doc.roundedRect(16, yN - 4, 178, 10, 2, 2, 'F');
-        doc.setFontSize(10);
-        doc.setFont('helvetica', 'bold');
-        doc.setTextColor(255, 101, 132);
-        doc.text(
-          `Note #${idx + 1}  |  Page ${note.page}  |  ${note.timestamp}`,
-          18, yN + 3
-        );
-        yN += 12;
-
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(9);
-        doc.setTextColor(210, 210, 240);
-        doc.splitTextToSize(note.text, 175).forEach(line => {
-          if (yN > 278) { doc.addPage(); yN = 20; }
-          doc.text(line, 18, yN);
-          yN += 5.5;
-        });
-        yN += 6;
-      });
-    }
-
-    drawPdfFooters(doc, 'AI PDF Reader — Summary Report');
+    drawPdfFooters(doc, 'AI PDF Reader — Summary');
     doc.save(`${state.fileName}_summary.pdf`);
     hideProgress();
-    showToast('✅ Summary report exported!');
-
+    showToast('✅ Summary exported!');
   } catch (err) {
     hideProgress();
     showToast('❌ Export failed: ' + err.message);
-    console.error(err);
   }
 });
 
@@ -1360,7 +1346,7 @@ function saveLocal() {
   try {
     localStorage.setItem('pdf_bookmarks', JSON.stringify(state.bookmarks));
     localStorage.setItem('pdf_notes',     JSON.stringify(state.notes));
-  } catch { /* quota exceeded */ }
+  } catch {}
 }
 
 function loadLocal() {
@@ -1370,7 +1356,7 @@ function loadLocal() {
     if (bk) state.bookmarks = JSON.parse(bk);
     if (nt) state.notes     = JSON.parse(nt);
     renderBookmarks();
-  } catch { }
+  } catch {}
 }
 
 loadLocal();
@@ -1379,61 +1365,47 @@ loadLocal();
    KEYBOARD SHORTCUTS
    ============================================ */
 document.addEventListener('keydown', e => {
-  // Skip if typing in input/textarea
-  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+  if (['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
 
   switch (e.key) {
     case 'ArrowRight':
     case 'ArrowDown':
-      navigateToPage(state.currentPage + 1);
-      break;
+      setActivePage(state.currentPage + 1); break;
     case 'ArrowLeft':
     case 'ArrowUp':
-      navigateToPage(state.currentPage - 1);
-      break;
+      setActivePage(state.currentPage - 1); break;
     case ' ':
       e.preventDefault();
-      if (state.isSpeaking)     pauseSpeech();
-      else if (state.isPaused)  resumeSpeech();
+      if (state.isSpeaking)    pauseSpeech();
+      else if (state.isPaused) resumeSpeech();
       break;
     case 'Escape':
-      stopSpeech();
-      break;
-    case '+':
-    case '=':
-      setZoom(state.scale + 0.25);
-      break;
+      stopSpeech(); break;
+    case '+': case '=':
+      setZoom(state.scale + 0.25); break;
     case '-':
-      setZoom(state.scale - 0.25);
-      break;
-    case 'f':
-    case 'F':
-      dom.searchBtn.click();
-      break;
-    case 'b':
-    case 'B':
-      if (state.pdfDoc) addBookmark(state.currentPage);
-      break;
+      setZoom(state.scale - 0.25); break;
+    case 'f': case 'F':
+      dom.searchBtn.click(); break;
+    case 'b': case 'B':
+      if (state.pdfDoc) addBookmark(state.currentPage); break;
   }
 });
 
 /* ============================================
-   PAGE VISIBILITY (pause when tab hidden)
+   VISIBILITY & UNLOAD
    ============================================ */
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && state.isSpeaking) pauseSpeech();
 });
 
-/* ============================================
-   BEFORE UNLOAD (save state)
-   ============================================ */
 window.addEventListener('beforeunload', () => {
   stopSpeech();
   saveLocal();
 });
 
 /* ============================================
-   UTILITY: DEBOUNCE
+   UTILITY
    ============================================ */
 function debounce(fn, delay) {
   let timer;
@@ -1444,17 +1416,15 @@ function debounce(fn, delay) {
 }
 
 /* ============================================
-   PWA SERVICE WORKER
+   SERVICE WORKER
    ============================================ */
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js')
-      .then(() => console.log('✅ Service Worker registered'))
+      .then(() => console.log('✅ SW registered'))
       .catch(err => console.warn('SW error:', err));
   });
 }
 
-console.log(
-  '%c🎤 AI PDF Reader Ready!',
-  'color:#6C63FF;font-size:16px;font-weight:bold;'
-);
+console.log('%c🎤 AI PDF Reader Ready!',
+  'color:#6C63FF;font-size:16px;font-weight:bold;');
