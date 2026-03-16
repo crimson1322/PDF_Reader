@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="theme-color" content="#6C63FF"/>
+  <meta name="description" content="AI PDF Reader with Text to Speech"/>
+  <title>AI PDF Reader</title>
+
+  <link rel="manifest" href="manifest.json"/>
+
+  <!-- Bootstrap 5 CSS -->
+  <link
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"/>
+
+  <!-- Bootstrap Icons -->
+  <link
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"/>
+
+  <!-- App Styles -->
+  <link rel="stylesheet" href="styles.css"/>
+
+  <!-- PDF.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+  <!-- jsPDF -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body>
+
+<!-- ========================================
+     SPLASH SCREEN
+     ======================================== -->
+<div id="splash">
+  <div class="text-center">
+    <div class="splash-icon mb-3">
+      <i class="bi bi-file-earmark-pdf-fill text-danger" style="font-size:80px;"></i>
+    </div>
+    <div class="splash-title">AI PDF Reader</div>
+    <p class="text-secondary mt-2">Smart Reading with Voice</p>
+    <div class="d-flex justify-content-center mt-4">
+      <div class="spinner-border text-primary"
+           role="status"
+           style="width:36px;height:36px;">
+        <span class="visually-hidden">Loading...</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========================================
+     MAIN APP
+     ======================================== -->
+<div id="app" class="d-none">
+
+  <!-- PROGRESS BAR -->
+  <div id="progressWrap" class="d-none">
+    <div class="progress">
+      <div id="progressFill"
+           class="progress-bar"
+           role="progressbar"
+           style="width:0%"></div>
+    </div>
+    <div id="progressLabel">Loading...</div>
+  </div>
+
+  <!-- TOAST NOTIFICATION -->
+  <div class="toast-container position-fixed bottom-0 start-50
+              translate-middle-x mb-5 pb-4 p-2">
+    <div id="appToast"
+         class="toast align-items-center app-toast border-0"
+         role="alert"
+         data-bs-delay="2500"
+         aria-live="assertive"
+         aria-atomic="true">
+      <div class="d-flex">
+        <div class="toast-body" id="toastMsg">Message</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================
+       NAVBAR
+       ================== -->
+  <nav class="navbar app-navbar d-flex align-items-center gap-2">
+
+    <button id="menuBtn"
+            class="btn btn-sm btn-outline-secondary border-0"
+            title="Toggle Sidebar"
+            aria-label="Menu">
+      <i class="bi bi-list fs-5"></i>
+    </button>
+
+    <span id="docTitle" class="navbar-brand-title flex-grow-1 mx-1">
+      AI PDF Reader
+    </span>
+
+    <div class="d-flex gap-1 nav-actions">
+      <button id="searchBtn"
+              class="btn btn-sm btn-outline-secondary border-0"
+              title="Search">
+        <i class="bi bi-search"></i>
+      </button>
+      <button id="bookmarkBtn"
+              class="btn btn-sm btn-outline-secondary border-0"
+              title="Add Bookmark">
+        <i class="bi bi-bookmark-plus"></i>
+      </button>
+      <button id="exportBtn"
+              class="btn btn-sm btn-outline-secondary border-0"
+              title="Export"
+              data-bs-toggle="modal"
+              data-bs-target="#exportModal">
+        <i class="bi bi-download"></i>
+      </button>
+    </div>
+
+  </nav>
+
+  <!-- ==================
+       SEARCH BAR
+       ================== -->
+  <div id="searchBar" class="d-none">
+    <div class="input-group input-group-sm">
+
+      <span class="input-group-text bg-transparent border-secondary">
+        <i class="bi bi-search text-secondary"></i>
+      </span>
+
+      <input type="text"
+             id="searchInput"
+             class="form-control"
+             placeholder="Search in document..."
+             aria-label="Search"/>
+
+      <button class="btn btn-outline-secondary" id="searchPrev" title="Previous result">
+        <i class="bi bi-chevron-left"></i>
+      </button>
+      <button class="btn btn-outline-secondary" id="searchNext" title="Next result">
+        <i class="bi bi-chevron-right"></i>
+      </button>
+
+      <span class="input-group-text" id="searchCount"></span>
+
+      <button class="btn btn-outline-danger" id="searchClose" title="Close search">
+        <i class="bi bi-x-lg"></i>
+      </button>
+
+    </div>
+  </div>
+
+  <!-- ==================
+       MAIN LAYOUT
+       ================== -->
+  <div class="main-layout">
+
+    <!-- SIDEBAR -->
+    <aside id="sidebar" class="d-none">
+
+      <!-- Sidebar Header -->
+      <div class="sidebar-header">
+        <span class="title">
+          <i class="bi bi-layout-sidebar me-1 text-primary"></i>Contents
+        </span>
+        <button id="closeSidebar"
+                class="btn btn-sm btn-outline-secondary border-0"
+                title="Close sidebar">
+          <i class="bi bi-x-lg"></i>
+        </button>
+      </div>
+
+      <!-- Sidebar Tabs -->
+      <div class="sidebar-tabs">
+        <div class="nav nav-pills gap-1">
+          <button class="nav-link active tab-btn" data-tab="toc">
+            <i class="bi bi-list-ul"></i> Outline
+          </button>
+          <button class="nav-link tab-btn" data-tab="bookmarks">
+            <i class="bi bi-bookmarks"></i> Saved
+          </button>
+          <button class="nav-link tab-btn" data-tab="thumbnails">
+            <i class="bi bi-grid"></i> Pages
+          </button>
+        </div>
+      </div>
+
+      <!-- TOC Panel -->
+      <div id="tocPanel" class="tab-panel">
+        <div id="tocList">
+          <div class="empty-state">
+            <i class="bi bi-journal-x"></i>
+            No outline available
+          </div>
+        </div>
+      </div>
+
+      <!-- Bookmarks Panel -->
+      <div id="bookmarksPanel" class="tab-panel d-none">
+        <div id="bookmarkList">
+          <div class="empty-state">
+            <i class="bi bi-bookmark"></i>
+            No bookmarks yet
+          </div>
+        </div>
+      </div>
+
+      <!-- Thumbnails Panel -->
+      <div id="thumbnailsPanel" class="tab-panel d-none">
+        <div id="thumbnailList"></div>
+      </div>
+
+    </aside><!-- end sidebar -->
+
+    <!-- ==================
+         VIEWER WRAPPER
+         ================== -->
+    <div class="viewer-wrapper">
+
+      <!-- UPLOAD ZONE -->
+      <div id="uploadZone">
+        <div class="upload-card">
+
+          <div class="upload-icon-wrap">
+            <i class="bi bi-file-earmark-arrow-up"></i>
+          </div>
+
+          <h5>Open PDF Document</h5>
+          <p>Tap to browse or drag &amp; drop a PDF file</p>
+
+          <label for="fileInput" class="upload-btn-label">
+            <i class="bi bi-folder2-open me-2"></i>Choose PDF File
+          </label>
+          <input type="file"
+                 id="fileInput"
+                 accept=".pdf"
+                 class="d-none"
+                 aria-label="Choose PDF file"/>
+
+          <!-- Feature Grid -->
+          <div class="row g-2 mt-4">
+            <div class="col-6">
+              <div class="feature-box">
+                <i class="bi bi-mic-fill"></i>
+                <span>AI Voice Reading</span>
+              </div>
+            </div>
+            <div class="col-6">
+              <div class="feature-box">
+                <i class="bi bi-search"></i>
+                <span>Text Search</span>
+              </div>
+            </div>
+            <div class="col-6">
+              <div class="feature-box">
+                <i class="bi bi-file-earmark-arrow-down"></i>
+                <span>Export PDF</span>
+              </div>
+            </div>
+            <div class="col-6">
+              <div class="feature-box">
+                <i class="bi bi-bookmarks-fill"></i>
+                <span>Bookmarks</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div><!-- end uploadZone -->
+
+      <!-- PDF CANVAS CONTAINER -->
+      <div id="pdfContainer" class="d-none">
+        <div id="pdfViewer"></div>
+      </div>
+
+    </div><!-- end viewer-wrapper -->
+
+  </div><!-- end main-layout -->
+
+  <!-- ==================
+       BOTTOM TOOLBAR
+       ================== -->
+  <div id="bottomBar"
+       class="d-none d-flex align-items-center
+              justify-content-between gap-1 flex-wrap">
+
+    <!-- Page Navigation -->
+    <div class="page-nav-group">
+      <button id="prevPage"
+              class="btn btn-sm btn-outline-secondary"
+              title="Previous page">
+        <i class="bi bi-chevron-left"></i>
+      </button>
+
+      <div class="d-flex align-items-center gap-1">
+        <input type="number"
+               id="currentPageInput"
+               class="form-control form-control-sm"
+               min="1"
+               value="1"
+               aria-label="Current page"/>
+        <span class="total-pages-label">
+          / <span id="totalPages">0</span>
+        </span>
+      </div>
+
+      <button id="nextPage"
+              class="btn btn-sm btn-outline-secondary"
+              title="Next page">
+        <i class="bi bi-chevron-right"></i>
+      </button>
+    </div>
+
+    <!-- Zoom Controls -->
+    <div id="zoomGroup">
+      <button id="zoomOut"
+              class="btn btn-sm btn-outline-secondary"
+              title="Zoom out">
+        <i class="bi bi-zoom-out"></i>
+      </button>
+      <span id="zoomLevel">100%</span>
+      <button id="zoomIn"
+              class="btn btn-sm btn-outline-secondary"
+              title="Zoom in">
+        <i class="bi bi-zoom-in"></i>
+      </button>
+      <button id="fitPage"
+              class="btn btn-sm btn-outline-secondary"
+              title="Fit to page">
+        <i class="bi bi-fullscreen"></i>
+      </button>
+    </div>
+
+    <!-- Speech Controls -->
+    <div class="speech-group">
+
+      <button id="voiceSettingsBtn"
+              class="btn btn-sm btn-outline-secondary"
+              data-bs-toggle="offcanvas"
+              data-bs-target="#voiceOffcanvas"
+              title="Voice settings">
+        <i class="bi bi-sliders"></i>
+      </button>
+
+      <button id="playBtn" class="play-btn-main">
+        <i class="bi bi-play-fill"></i>Read
+      </button>
+
+      <button id="pauseBtn"
+              class="btn btn-sm btn-outline-secondary d-none"
+              title="Pause">
+        <i class="bi bi-pause-fill"></i>
+      </button>
+
+      <button id="stopBtn"
+              class="btn btn-sm btn-outline-danger"
+              title="Stop reading">
+        <i class="bi bi-stop-fill"></i>
+      </button>
+
+      <button id="readPageBtn"
+              class="btn btn-sm btn-outline-info"
+              title="Read this page only">
+        <i class="bi bi-file-earmark-play"></i>
+      </button>
+
+    </div>
+
+  </div><!-- end bottomBar -->
+
+  <!-- ==================
+       VOICE OFFCANVAS
+       ================== -->
+  <div class="offcanvas offcanvas-bottom"
+       tabindex="-1"
+       id="voiceOffcanvas"
+       aria-labelledby="voiceOffcanvasLabel">
+
+    <div class="offcanvas-header">
+      <h5 class="offcanvas-title" id="voiceOffcanvasLabel">
+        <i class="bi bi-mic-fill text-primary me-2"></i>Voice Settings
+      </h5>
+      <button type="button"
+              class="btn-close btn-close-white"
+              data-bs-dismiss="offcanvas"
+              aria-label="Close"></button>
+    </div>
+
+    <div class="offcanvas-body">
+
+      <!-- Voice Selector -->
+      <div class="mb-3">
+        <label class="form-label text-secondary small" for="voiceList">
+          <i class="bi bi-person-voice me-1"></i>Voice
+        </label>
+        <select id="voiceList" class="form-select form-select-sm"></select>
+      </div>
+
+      <!-- Speed -->
+      <div class="mb-3">
+        <label class="form-label text-secondary small
+                      d-flex justify-content-between align-items-center"
+               for="speedRange">
+          <span><i class="bi bi-speedometer2 me-1"></i>Speed</span>
+          <span id="speedVal" class="val-badge">1.0x</span>
+        </label>
+        <input type="range"
+               class="form-range"
+               id="speedRange"
+               min="0.5" max="2" step="0.1" value="1"
+               aria-label="Speed"/>
+      </div>
+
+      <!-- Pitch -->
+      <div class="mb-3">
+        <label class="form-label text-secondary small
+                      d-flex justify-content-between align-items-center"
+               for="pitchRange">
+          <span><i class="bi bi-bar-chart-line me-1"></i>Pitch</span>
+          <span id="pitchVal" class="val-badge">1.0</span>
+        </label>
+        <input type="range"
+               class="form-range"
+               id="pitchRange"
+               min="0" max="2" step="0.1" value="1"
+               aria-label="Pitch"/>
+      </div>
+
+      <!-- Volume -->
+      <div class="mb-3">
+        <label class="form-label text-secondary small
+                      d-flex justify-content-between align-items-center"
+               for="volumeRange">
+          <span><i class="bi bi-volume-up me-1"></i>Volume</span>
+          <span id="volumeVal" class="val-badge">100%</span>
+        </label>
+        <input type="range"
+               class="form-range"
+               id="volumeRange"
+               min="0" max="1" step="0.1" value="1"
+               aria-label="Volume"/>
+      </div>
+
+      <!-- Test Voice Button -->
+      <button id="testVoice" class="btn btn-outline-primary w-100">
+        <i class="bi bi-play-circle me-2"></i>Test Voice
+      </button>
+
+    </div>
+  </div><!-- end voiceOffcanvas -->
+
+  <!-- ==================
+       NOTES OFFCANVAS
+       ================== -->
+  <div class="offcanvas offcanvas-bottom"
+       tabindex="-1"
+       id="notesOffcanvas"
+       aria-labelledby="notesOffcanvasLabel">
+
+    <div class="offcanvas-header">
+      <h5 class="offcanvas-title" id="notesOffcanvasLabel">
+        <i class="bi bi-journal-text text-warning me-2"></i>Reading Notes
+      </h5>
+      <button type="button"
+              class="btn-close btn-close-white"
+              data-bs-dismiss="offcanvas"
+              aria-label="Close"></button>
+    </div>
+
+    <div class="offcanvas-body">
+      <div class="note-page-info">
+        <i class="bi bi-info-circle text-primary"></i>
+        Adding note for
+        <strong id="notePageLabel">Page 1</strong>
+      </div>
+
+      <textarea id="notesInput"
+                class="form-control"
+                placeholder="Write your reading notes here..."
+                aria-label="Notes"></textarea>
+
+      <div class="notes-actions">
+        <button id="saveNote" class="btn btn-primary flex-fill">
+          <i class="bi bi-floppy me-1"></i>Save Note
+        </button>
+        <button id="clearNote"
+                class="btn btn-outline-secondary"
+                title="Clear">
+          <i class="bi bi-trash"></i>
+        </button>
+      </div>
+    </div>
+
+  </div><!-- end notesOffcanvas -->
+
+  <!-- ==================
+       EXPORT MODAL
+       ================== -->
+  <div class="modal fade"
+       id="exportModal"
+       tabindex="-1"
+       aria-labelledby="exportModalLabel"
+       aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+
+        <div class="modal-header">
+          <h5 class="modal-title" id="exportModalLabel">
+            <i class="bi bi-box-arrow-up text-primary me-2"></i>Export Document
+          </h5>
+          <button type="button"
+                  class="btn-close btn-close-white"
+                  data-bs-dismiss="modal"
+                  aria-label="Close"></button>
+        </div>
+
+        <div class="modal-body d-flex flex-column gap-3">
+
+          <button class="export-opt" id="exportNotesPdf">
+            <i class="bi bi-journal-bookmark-fill"></i>
+            <div>
+              <strong>Export Reading Notes</strong>
+              <small>Save your notes &amp; bookmarks as PDF</small>
+            </div>
+          </button>
+
+          <button class="export-opt" id="exportTextPdf">
+            <i class="bi bi-file-text-fill"
+               style="color:var(--success)!important;"></i>
+            <div>
+              <strong>Export Page Text</strong>
+              <small>Save all extracted text as PDF</small>
+            </div>
+          </button>
+
+          <button class="export-opt" id="exportSummaryPdf">
+            <i class="bi bi-bar-chart-fill"
+               style="color:var(--secondary)!important;"></i>
+            <div>
+              <strong>Export Summary Report</strong>
+              <small>Document stats, bookmarks &amp; notes</small>
+            </div>
+          </button>
+
+        </div>
+      </div>
+    </div>
+  </div><!-- end exportModal -->
+
+  <!-- FAB (Notes) -->
+  <button class="fab"
+          id="fab"
+          data-bs-toggle="offcanvas"
+          data-bs-target="#notesOffcanvas"
+          title="Add Reading Note"
+          aria-label="Add note">
+    <i class="bi bi-pencil-fill"></i>
+  </button>
+
+</div><!-- end #app -->
+
+<!-- Bootstrap 5 JS Bundle -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+<!-- App Script -->
+<script src="app.js"></script>
+</body>
+</html>
